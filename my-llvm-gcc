@@ -1,0 +1,212 @@
+#!/usr/bin/perl
+# [my-llvm-gcc] A wrapper for llvm-gcc and llvm-ld.
+# v. 0.16, 2008-11-04
+# Copyright 2008 Andrey Petrov (see ptr-analysis/COPYING)
+#-------------------------------------------------------------------------------
+# This script can be used to build LLVM bitcode executables or libraries
+#   from most source packages. It accepts the same options as gcc and may
+#   be used for both compiling and linking. It will adjust the options
+#   as needed and run either llvm-gcc or llvm-ld.
+# Do 'export CC=my-llvm-gcc', then build normally (./configure && make),
+#   and it should produce some *.bc files.
+#-------------------------------------------------------------------------------
+use strict;
+
+my @args= ();       # ARGV with -O, -g, -ansi removed
+my $out= '';        # output file name
+my $cfile= '';      # last .c file on the command line
+my $ofile= '';      # last .o (input) file
+# L - link .o files, C - compile .c to .o, B - compile .c to binary,
+#   E - preprocess .c
+my $mode= '';
+my $conftest= 0;    # is this an autoconf test?
+my $o_next= 0;      # is the current word the arg of -o?
+my $prev= '';
+my @Wl= ();         # the -Wl args (used only for linking)
+my $is_dll= 0;      # is the output a DLL? (for conftest only)
+for(@ARGV){
+  # remove options unsupported by either llvm-gcc or llvm-ld
+  next if /^-([BKORgk]|(ansi|mt|[mp]?threads)$)/;
+  if(/^-Wl/){
+    push @Wl, $_;
+    next;
+  }
+  $is_dll= 1 if /^-(fPIC|shared)$/;
+  push @args, $_;
+  if(/^conftest[0-9]*\.c$/){
+    $conftest= 1;
+    $cfile= $_;
+  }elsif($_ eq '-c'){
+    $mode= 'C';
+  }elsif($_ eq '-E'){
+    $mode= 'E';
+  }elsif($_ eq '-o'){
+    $o_next= 1;
+  }elsif($o_next){
+    die '>1 output file' if $out;
+    $out= $_;
+    $o_next= 0;
+  }elsif(/\.c$/){
+    print "!! >1 .c file\n" if $cfile;
+    $cfile= $_;
+  }elsif(/\.o$/){
+    # ignore .o file specified as an -M arg
+    $ofile= $_ unless $prev =~ /^-M[FQT]$/;
+  }
+  $prev= $_;
+}
+
+if($ofile){
+  # link if there are any .o inputs
+  if($mode eq 'C' || $mode eq 'E'){
+    die '-c/-E option given with .o input';
+  }
+  die 'unexpected mode' if $mode;
+  $mode= 'L';
+  print "!! both .c and .o inputs\n" if $cfile;
+}elsif($cfile){
+  # without -c option, .c compiles to binary
+  if(!$mode){
+    $mode= 'B';
+  }elsif($mode eq 'E'){
+    # run the preprocessor as is
+    unshift @args, 'llvm-gcc';
+    exec @args;
+  }else{
+    die 'unexpected mode' if $mode ne 'C';
+  }
+}else{
+  # with no inputs, just run llvm-gcc with the given options
+  unshift @args, 'llvm-gcc';
+  exec @args;
+}
+
+# filters the args before linking
+sub link_args{
+  my @args= @_;
+  # the gcc option -Wl,foo,bar passes args foo/bar to ld
+  # e.g. '-Wl,--rpath,../lib' => '--rpath ../lib'
+  for(@Wl){
+    my @sWl= split /,/;
+    shift @sWl;   # discard -Wl
+    push @args, @sWl;
+  }
+  # link using llvm-ld; we don't need my-llvm-ld because all it does
+  # is remove the -m option.
+  my @ldargs= ('llvm-ld');
+  my $u_next= 0;    # is the current word the arg of -u, -m, or --rpath?
+  my $ed_seen= 0;
+  for(@args){
+    # llvm-ld doesn't accept -u, -m, or --rpath, which take a separate arg
+    if($u_next){
+      $u_next= 0;
+    }elsif(/^-(-*rpath|u|m)$/){
+      $u_next= 1;
+    # this may only occur once
+    }elsif(/^--*export-dynamic$/){
+      if(!$ed_seen){
+        $ed_seen= 1;
+        push @ldargs, $_;
+      }
+    }else{
+      # the command may have compiler options, which gcc removes
+      # before running ld
+      push @ldargs, $_ unless
+          /^-(shared|static|-*enable-new-dtags|[BDIKORWfgkmpru])/;
+    }
+  }
+  return @ldargs;
+}
+
+if($mode eq 'L'){
+  my @ldargs= link_args(@args);
+  # if the output is .a or .so, make it a bitcode library
+  # rather than an executable shell script
+  push @ldargs, '-r' if $out =~ /\.(a|so[\.0-9]*~?)$/;
+  # don't optimize during the build - we run the optimizer on the
+  # finished .bc executable.
+  push @ldargs, '-disable-opt';
+  print "--- ldargs= @ldargs\n";
+  exec(@ldargs);
+}elsif($conftest){
+  if($mode eq 'C' || $is_dll){
+    # for conftest, make a native .o file or DLL
+    unshift @args, 'llvm-gcc';
+    exec(@args);
+  }
+  # compile to a native executable, possibly linking to bitcode libs
+  # make sure we have the binary name
+  $out= 'a.out' unless $out;
+  # first compile to an LLVM .o file
+  my @ccargs= ('llvm-gcc', '-emit-llvm', '-c');
+  my $o_next= 0;
+  for(@args){
+    if($o_next){
+      $o_next= 0;
+    }elsif($_ eq '-o'){
+      $o_next= 1;
+    }else{
+      # don't pass libs to cc
+      push @ccargs, $_ unless /^-[Ll]/;
+    }
+  }
+  push @ccargs, ('-o', "$out.o");
+  print "--- ccargs= @ccargs\n";
+  system(@ccargs);
+  # now link with all libs into a .bc file (with executable wrapper)
+  my @ldargs= link_args(@args);
+  # replace the .c input by the .o we just made;
+  # the output name is already correct
+  for(@ldargs){
+    $_= "$out.o" if $_ eq $cfile;
+  }
+  print "--- ldargs= @ldargs\n";
+  system(@ldargs);
+  # convert the .bc to x86 asm
+  system("rm -f $out");
+  system("llc -f -o $out.s $out.bc");
+  shift @ldargs;  # replace llvm-ld by gcc
+  unshift @ldargs, 'gcc';
+  for(@ldargs){   # replace .o input by .s
+    s/\.o$/\.s/;
+  }
+  print "--- ldargs= @ldargs\n";
+  system(@ldargs);
+  #system("ls -l $out*");
+  exec("rm -f $out.bc $out.s");
+}else{
+  # count the lines of code before and after preprocessing
+  my @res= split /\s+/, qx/wc -l $cfile/;
+  my $loc1= shift @res;
+
+  my @ppargs= ('-E');
+  # when preprocessing, include all options and files except -c/-o
+  my $o_next= 0;
+  for(@args){
+    if($o_next){
+      $o_next= 0;
+    }elsif($_ eq '-o'){
+      $o_next= 1;
+    }elsif($_ ne '-c'){
+      push @ppargs, $_;
+    }
+  }
+  print "--- ppargs= @ppargs\n";
+  my $loc2= 0;
+  # this form of open() avoids using the shell to interpret the args
+  open my $pp, '-|', 'llvm-gcc', @ppargs;
+  while(<$pp>){
+    ++$loc2;
+  }
+  close $pp;
+  print "$cfile: LOC = $loc1\n  PPLOC = $loc2\n";
+
+  # disable all optimization during compilation (since we will use a
+  #   specific set of optimizations later)
+  push @args, '-O0';
+  # produce LLVM bitcode .o files but normal binaries
+  unshift @args, '-emit-llvm' if $mode eq 'C';
+  unshift @args, 'llvm-gcc';
+  print "--- args= @args\n";
+  exec(@args);
+}

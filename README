@@ -1,0 +1,188 @@
+=====================  UT Austin Pointer Analysis Project  =====================
+v. 0.16, 2008-12-01
+
+--- FILES ---
+
+* anders/ (shared library) - implements Andersen-style pointer analysis
+* anders-aa/ (LLVM loadable module) - a wrapper to run Anders
+* include/ - headers used by Anders
+* my-llvm-gcc - a script for compiling benchmarks (see below)
+
+Note: Anders is a library, rather than a module, because our
+flow-sensitive analysis also uses it.
+
+
+--- ALGORITHM ---
+
+This package presents a whole-program, field-sensitive implementation
+of inclusion-based (aka Andersen-style) pointer analysis, using the
+LLVM compiler infrastructure. By 'whole-program', we mean that the
+analysis assumes that all relevant source code is available in a
+single module, and therefore that any external code is irrelevant with
+respect to sound pointer analysis. The effects of external code that
+is relevant to pointer analysis can be summarized using hand-crafted
+function stubs (see the documentation below).
+
+Be warned that this implementation is a research prototype, not
+suitable for production use -- we do not guarantee the soundness of
+the results, though we do our best. Any bug reports (or even better,
+fixes) are greatly appreciated; contact information is at the end of
+this file.
+
+The basic algorithm we use is described in "The Ant and the
+Grasshopper: Fast and Accurate Pointer Analysis for Millions of Lines
+of Code", by Ben Hardekopf and Calvin Lin, in PLDI 2007. Another paper
+by Hardekopf & Lin describes the optimizations HVN, HRU, and LE:
+"Exploiting Pointer and Location Equivalence to Optimize Pointer
+Analysis", in SAS 2007.
+
+Our implementation has 3 phases:
+
+* Object/constraint identification (obj_cons_id.cpp): creates graph
+  nodes for all relevant values in the program and translates
+  instructions into inclusion constraints.
+
+* Offline constraint optimizations (cons_opt.cpp):
+  + HVN (Hash-based Value Numbering)
+  + HRU (HVN with Reference and Union processing)
+  + HCD (Hybrid Cycle Detection)
+
+* Constraint solving (solve.cpp): this basically finds the dynamic
+  transitive closure of the graph. We remove cycles using LCD (Lazy
+  Cycle Detection) and HCD (which uses the results of the offline
+  analysis).
+
+We use BDDs (binary decision diagrams) to store the points-to set of
+each node, and sparse bitmaps to store the constraint edges.
+
+--- INSTALLING ---
+
+Requirements:
+
+* Linux/i386 system (may work on others but we haven't tested)
+* LLVM (latest SVN version) <http://www.llvm.org/>
+* llvm-gcc (skip if you don't need to compile benchmarks)
+* BuDDy (the BDD library) <http://buddy.wiki.sourceforge.net/>
+* (optional) Google profiler <http://code.google.com/p/google-perftools/>
+
+Here we refer to user-defined directories $LLSRC, $LLOBJ, $LLINST, $LGSRC,
+$LGOBJ, $LGINST. The command lines assume you're using Bash.
+
+ 1. Unpack the LLVM source into $LLSRC
+ 2. > mkdir $LLOBJ && cd $LLOBJ && $LLSRC/configure --prefix=$LLINST
+      --enable-optimized --enable-targets=host-only --enable-bindings=none
+      && make
+ 3. Compile BuDDy and the Google profiler
+ 4. Copy libbdd.a and libprofiler.a to $LLOBJ/Release/lib
+ 5. Copy this distribution (ptr-analysis) to $LLSRC/projects
+ 7. Edit include/config.h
+ 8. > cd $LLOBJ && make -C projects && make install
+ 9. Unpack llvm-gcc to $LGSRC.
+10. > mkdir $LGOBJ && cd $LGOBJ && $LGSRC/configure --prefix=$LGINST
+      --program-prefix=llvm- --enable-bootstrap --enable-llvm=$LLOBJ
+      --enable-languages='c,c++' --disable-werror && make && make install
+11. > export PATH=$LLINST/bin:$LGINST/bin:$PATH
+
+
+--- RUNNING ---
+
+To analyze an LLVM bitcode module 'file.bc', do:
+
+> opt -load $LLINST/lib/anders-aa.so -anders -disable-verify file.bc
+
+You can add any of these options:
+
+  -analyze : Print the points-to solution, but only for top-level variables,
+             because AndersAA::print() runs after Anders::pts_cleanup().
+
+  -debug : Print all debug info while running.
+
+  -debug-only=anders : Print the info enabled with the DEBUG_* options
+                       in config.h.
+
+  -time-passes : Print the total time used by the Anders pass.
+
+If everything works, you will see about 50 lines of various
+statistics. Problems will be reported by lines starting with '!!';
+most of these are non-fatal but some cause assertion failures. Usually
+this means some special case is not handled.
+
+If you enabled profiling in config.h, it will create /tmp/anders.prof,
+which can be analyzed with pprof (see the google-perftools docs).
+
+
+--- BUILDING BENCHMARKS ---
+
+To analyze a single C file, just compile it to a LLVM bitcode *.bc
+object file:
+
+> llvm-gcc -O0 -emit-llvm -c -o foo.bc foo.c
+
+We support only C code; C++ will run but the result may be incomplete.
+
+Programs with multiple source files need to be linked into a single
+bitcode file before using our analysis. We use two steps: 
+
+(1) compile the program using the included script 'my-llvm-gcc' as a
+    drop-in replacement for GCC:
+
+    > export CC=my-llvm-gcc && ./configure && make
+
+    This step may involve some trial and error depending on the
+    program's build system.
+
+(2) optionally run the resulting *.bc file through LLVM's opt with
+    various optimizations enabled, to produce the final *.bc file.
+
+Pre-compiled *.bc files used for our own benchmarking are available by
+request.
+
+Most benchmarks will have calls to functions not included in the
+source code, so-called 'external functions'. For soundness, any
+external functions relevant to pointer analysis must have a
+hand-crafted function stub summarizing its behavior; these summaries
+are in the files 'extinfo.h' and 'extinfo.cpp'. Many stubs have
+already been included. Sometimes a package makes hundreds of calls to
+a single library (e.g. glib, gtk); in that case it may be best to
+build that library as a bitcode .a file and link it into the
+binary. As of v. 0.16, extinfo.cpp has all functions from all the
+benchmarks used for our benchmarks except gimp.
+
+
+--- TODO ---
+
+* (see FIXMEs in obj_cons_id.cpp and extinfo.cpp)
+* implement field-insensitive mode
+* make HRU faster - see cons_opt.cpp/hr()
+* implement LE (location equivalence) optimization
+* store nodes representing top-level and address-taken variables in separate
+  vectors (rather than putting all nodes in the same vector)
+* make a PtrInfo class to store the points-to sets, so that we can switch
+  between bitmap and BDD implementations and optimize them without changing
+  the solver code
+* automatically select initial BDD allocation based on program size
+* do more profiling and optimization
+* separate the constraint generator into a front-end, for use with different
+  types of analysis
+* support first-class structs (new LLVM feature)
+* try other worklist priorities
+* in solve.cpp/handle_ext(): support other types of functions
+* in extinfo.cpp, add remaining calls for the gimp benchmark
+
+
+
+--- AUTHORS ---
+
+This project was created by the Speedway compiler research group at
+the University of Texas at Austin:
+<http://www.cs.utexas.edu/users/speedway/>,
+<http://www.cs.utexas.edu/~benh/>.
+
+See ./COPYING for the license and detailed copyrights.
+
+Andrey Petrov <apetrov87@gmail.com> developed Anders, using some ideas
+from the original LLVM implementation
+($LLSRC/lib/Analysis/IPA/Andersens.cpp) and some code from Ben
+Hardekopf's earlier projects. Please e-mail him with bug reports and
+other questions.
+
