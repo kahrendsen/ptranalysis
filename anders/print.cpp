@@ -485,7 +485,7 @@ void Anders::list_ext_unknown(Module &M) const{
         }
       }
       if(rel && extinfo->get_type(it) == EFT_OTHER){
-        names.push_back(it->getNameStart());
+        names.push_back(it->getName().str());
       }
     }
   }

@@ -147,6 +147,13 @@ namespace __gnu_cxx{
         return 2;
     }
   };
+#if 1
+  template<> struct hash<std::basic_string<char> > {
+    size_t operator () (std::basic_string<char> bs) const {
+        return 43;
+    }
+  };
+#endif
   }
 /*
 namespace std{

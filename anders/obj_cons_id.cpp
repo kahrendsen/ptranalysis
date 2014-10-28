@@ -514,7 +514,9 @@ void Anders::processBlock(BasicBlock *BB)
       case Instruction::Call:
         id_call_insn(I);
         break;
+#if KSA
       case Instruction::Malloc:
+#endif
       case Instruction::Alloca:
         assert(is_ptr);
         id_alloc_insn(I);
@@ -646,6 +648,7 @@ void Anders::id_alloc_insn(Instruction *I){
   //heap-allocated or array => weak
   bool weak= 0;
   //Find out which type of data was allocated.
+#if KSA
   if(MallocInst *MI= dyn_cast<MallocInst>(AI)){
     weak= 1;
     T= trace_alloc_type(MI);
@@ -657,6 +660,7 @@ void Anders::id_alloc_insn(Instruction *I){
       T= AT->getElementType();
     }
   }
+#endif
 
   u32 on= next_node;
   obj_node[AI]= on;
@@ -1673,7 +1677,9 @@ u32 Anders::get_max_offset(Value *V){
   DEBUG(print_val_now(V));
   DEOL;
   const Type *T= V->getType();
+#if KSA
   assert(isa<PointerType>(T) && T->getContainedType(0) == Type::Int8Ty);
+#endif
   //If V is a CE or bitcast, the actual pointer type is its operand.
   if(ConstantExpr *E= dyn_cast<ConstantExpr>(V))
     T= E->getOperand(0)->getType();
